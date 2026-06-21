@@ -1,0 +1,125 @@
+services:
+
+  # ─── PostgreSQL — operational database ──────────────────────────────────────
+  postgres:
+    image: postgres:16
+    container_name: healthai-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: healthcare
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../healthcare-ai-platform-backend/migrations/V001__initial_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d healthcare"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── PostgreSQL — Redshift local (warehouse) ─────────────────────────────────
+  # Redshift is PostgreSQL-compatible; this instance stands in for it locally.
+  # Point REDSHIFT_URL at port 5433. Swap for real Redshift in staging/prod.
+  redshift-local:
+    image: postgres:16
+    container_name: healthai-redshift-local
+    environment:
+      POSTGRES_USER: warehouse
+      POSTGRES_PASSWORD: warehouse
+      POSTGRES_DB: warehouse
+    ports:
+      - "5433:5432"
+    volumes:
+      - redshift_data:/var/lib/postgresql/data
+      - ./init/warehouse_schema.sql:/docker-entrypoint-initdb.d/01_warehouse.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U warehouse -d warehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── Kafka (KRaft — no Zookeeper) ───────────────────────────────────────────
+  # Two listeners:
+  #   EXTERNAL://localhost:9092  → backend app running on the host
+  #   INTERNAL://kafka:9093      → kafka-ui and other containers
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: healthai-kafka
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_CFG_LISTENERS: EXTERNAL://:9092,INTERNAL://:9093,CONTROLLER://:9094
+      KAFKA_CFG_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:9093
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_CFG_LOG_RETENTION_HOURS: 168
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
+
+  # ─── Kafka UI ────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: healthai-kafka-ui
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
+    ports:
+      - "8090:8080"
+
+  # ─── MinIO — S3-compatible object storage ───────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: healthai-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 API  → set AWS_ENDPOINT_URL=http://localhost:9000
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ─── MinIO bucket init ───────────────────────────────────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: healthai-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/healthcare-docs &&
+        mc mb --ignore-existing local/healthcare-warehouse &&
+        echo 'Buckets ready.' &&
+        exit 0
+      "
+
+volumes:
+  postgres_data:
+  redshift_data:
+  kafka_data:
+  minio_data:
