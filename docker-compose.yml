@@ -82,6 +82,32 @@ services:
   #   ports:
   #     - "8090:8080"
 
+  # ─── Mailhog — local SMTP + web UI for dev emails ──────────────────────────
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: healthai-mailhog
+    ports:
+      - "1025:1025"   # SMTP — point SMTP_HOST=localhost:1025 in .env
+      - "8025:8025"   # Web UI — http://localhost:8025
+
+  # ─── pgAdmin — PostgreSQL web UI ────────────────────────────────────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: healthai-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@healthai.com
+      PGADMIN_DEFAULT_PASSWORD: Admin1234!
+      PGADMIN_SERVER_JSON_FILE: /pgadmin4/servers.json
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+      - ./pgadmin/pgpass:/pgpass:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # ─── MinIO — S3-compatible object storage ───────────────────────────────────
   minio:
     image: minio/minio:latest
@@ -123,3 +149,4 @@ volumes:
   redshift_data:
   kafka_data:
   minio_data:
+  pgadmin_data:
